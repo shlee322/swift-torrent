@@ -1,4 +1,19 @@
 Openstack Swift Bittorrent Middleware
+=========================================================
+
+proxy-server.conf
+```
+[pipeline:main]
+pipeline = torrent proxy-server
+
+[app:proxy-server]
+use = egg:swift#proxy
+
+[filter:torrent]
+paste.filter_factory = swifttorrent.middleware:filter_factory
+torrent_store = swifttorrent.common.store.swiftaccount:SwiftAccountStore
+```
+
 
 1. Middleware
 

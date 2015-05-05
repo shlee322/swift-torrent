@@ -6,13 +6,6 @@ import bencode
 import hashlib
 
 
-# Torrent Store : object_path(key), info_hash(key), piece_length
-# get_piece_length(account, container, obj)
-# get_obj_path_by_info_hash(infohash)
-# get_info_hash_and_piece_length(account, container, obj)
-# save(account, container, obj, info_hash, piece_len)
-
-
 class TorrentMiddleware(object):
 
     def __init__(self, app, conf):
@@ -20,20 +13,25 @@ class TorrentMiddleware(object):
         self.conf = conf
         self.logger = get_logger(conf, log_route='torrent')
 
-        self._torrent_store = None
+        torrent_store_module = conf.get('torrent_store', 'swifttorrent.common.store.swiftaccount:SwiftAccountStore').split(':')
+        self._torrent_store = __import__(torrent_store_module[0]).__attr__(torrent_store_module[1])(app, conf)
 
     def update_torrent_meta_info(self, req, piece_len=None):
         self.logger.debug('update_torrent_meta_info %s' % req.path_info)
 
         (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
 
+        # TODO : custom default piece_len
         if not piece_len:
             piece_len = 1024*64
 
         info = self.gen_torrent_meta_info(req, piece_len)
         info_hash = hashlib.sha1(bencode.bencode(info)).hexdigest()
 
-        self._torrent_store.save(account, container, obj_path, info_hash, piece_len)
+        self._torrent_store.save(
+            path=(account, container, obj_path),
+            info_hash=info_hash,
+            piece_length=piece_len)
 
     def gen_torrent_meta_info(self, req, piece_len):
         self.logger.debug('get_torrent_meta_info %s' % req.path_info)
@@ -46,12 +44,13 @@ class TorrentMiddleware(object):
 
         file_length = int(meta_resp.headers['Content-Length'])
 
+        # TODO : Get Pieces
         req_piece = wsgi.make_subrequest(request.environ, method='GET')
         if req_piece.params('torrent', None) is not None:
             del req_piece.params['torrent']
+
         resp_piece = req_piece.get_response(self.app)
 
-        # Get Pieces
         info = {
             'piece length': piece_len,
             'pieces': 'aa',
@@ -66,12 +65,12 @@ class TorrentMiddleware(object):
 
     def get_torrent_info_hash_and_piece_length(self, req):
         (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
-        return self._torrent_store.get_info_hash_and_piece_length(account, container, obj)
+        return self._torrent_store.get(['info_hash', 'piece_length'], path=(account, container, obj))
 
     def response_torrent_file(self, req):
         (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
 
-        piece_len = self._torrent_store.get_piece_length(account, container, obj)
+        piece_len = self._torrent_store.get(['piece_length'], path=(account, container, obj))
         info = self.get_torrent_meta_info(req, piece_len)
         torrent_file = {
             'info': info,
