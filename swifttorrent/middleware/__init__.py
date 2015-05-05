@@ -4,6 +4,7 @@ from swift.common.utils import split_path, get_logger
 from swift.common import wsgi
 import bencode
 import hashlib
+import math
 
 
 class TorrentMiddleware(object):
@@ -21,11 +22,8 @@ class TorrentMiddleware(object):
 
         (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
 
-        # TODO : custom default piece_len
-        if not piece_len:
-            piece_len = 1024*64
-
         info = self.gen_torrent_meta_info(req, piece_len)
+        piece_len = info['piece length']
         info_hash = hashlib.sha1(bencode.bencode(info)).hexdigest()
 
         self._torrent_store.save(
@@ -44,18 +42,34 @@ class TorrentMiddleware(object):
 
         file_length = int(meta_resp.headers['Content-Length'])
 
-        # TODO : Get Pieces
+        # TODO : custom default piece_len
+        if not piece_len:
+            piece_len = math.ceil(file_length / 1024)
+        else:
+            piece_len = int(piece_len)
+
+        # TODO : Pieces Cache (a,c,o,etag hash)
+
         req_piece = wsgi.make_subrequest(request.environ, method='GET')
         if req_piece.params('torrent', None) is not None:
             del req_piece.params['torrent']
 
-        resp_piece = req_piece.get_response(self.app)
+        pieces = ''
+
+        piece_count = math.ceil(file_length / piece_len)
+        for i in range(0, piece_count):
+            start_range = i*piece_len
+            end_range = max(start_range + piece_len, file_length)
+            req_piece.headers['Range'] = 'bytes=%s-%s' % (start_range, end_range)
+            resp_piece = req_piece.get_response(self.app)
+
+            # DEV : sha1
 
         info = {
             'piece length': piece_len,
-            'pieces': 'aa',
+            'pieces': pieces,
             'name': obj,
-            'length': meta_resp.headers['Content-Length'],
+            'length': file_length,
             'x-swift-account': account,
             'x-swift-container': container,
             'x-swift-object': obj,
