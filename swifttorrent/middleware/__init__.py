@@ -1,8 +1,16 @@
 from swift.common.http import is_success
 from swift.common.swob import wsgify
 from swift.common.utils import split_path, get_logger
+from swift.common import wsgi
 import bencode
 import hashlib
+
+
+# Torrent Store : object_path(key), info_hash(key), piece_length
+# get_piece_length(account, container, obj)
+# get_obj_path_by_info_hash(infohash)
+# get_info_hash_and_piece_length(account, container, obj)
+# save(account, container, obj, info_hash, piece_len)
 
 
 class TorrentMiddleware(object):
@@ -12,57 +20,66 @@ class TorrentMiddleware(object):
         self.conf = conf
         self.logger = get_logger(conf, log_route='torrent')
 
-    def gen_torrent_meta_info(self, req, res_obj_meta=None):
-        (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
-        # if HEAD:
-        # Call HEAD Content-Length
-        # Range Request
-        # else: HEAD HEADER
-        torrent_meta_info = {
-            'info': {
-                'piece length': 65536,
-                'pieces': 'aa',
-                'name': obj,
-                'length': 3,
-                'x-swift-account': account,
-                'x-swift-container': container,
-                'x-swift-object': obj,
-             },
-             'announce': 'http://tracker.elab.kr'
-        }
-
-        return torrent_meta_info
+        self._torrent_store = None
 
     def update_torrent_meta_info(self, req, piece_len=None):
-        #self.app
-        # Request HEAD -> 
-        pass
+        self.logger.debug('update_torrent_meta_info %s' % req.path_info)
 
-    def get_torrent_meta_info(self, req):
         (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
+
+        if not piece_len:
+            piece_len = 1024*64
+
+        info = self.gen_torrent_meta_info(req, piece_len)
+        info_hash = hashlib.sha1(bencode.bencode(info)).hexdigest()
+
+        self._torrent_store.save(account, container, obj_path, info_hash, piece_len)
+
+    def gen_torrent_meta_info(self, req, piece_len):
+        self.logger.debug('get_torrent_meta_info %s' % req.path_info)
+
+        (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
+
+        # Get File Length
+        sub = wsgi.make_subrequest(request.environ, method='HEAD')
+        meta_resp = sub.get_response(self.app)
+
+        file_length = int(meta_resp.headers['Content-Length'])
+
+        req_piece = wsgi.make_subrequest(request.environ, method='GET')
+        if req_piece.params('torrent', None) is not None:
+            del req_piece.params['torrent']
+        resp_piece = req_piece.get_response(self.app)
+
+        # Get Pieces
         info = {
-            'piece length': 65536,
+            'piece length': piece_len,
             'pieces': 'aa',
             'name': obj,
-            'length': 3,
+            'length': meta_resp.headers['Content-Length'],
             'x-swift-account': account,
             'x-swift-container': container,
             'x-swift-object': obj,
         }
+
         return info
 
     def get_torrent_info_hash_and_piece_length(self, req):
-        info = self.get_torrent_meta_info_dict(req)
-        bencode.bencode(info)
-        return 'aaaaaaaaaaaaaaaaaa', info['piece length']   # info_hash, Piece Length
+        (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
+        return self._torrent_store.get_info_hash_and_piece_length(account, container, obj)
 
     def response_torrent_file(self, req):
-        info = self.get_torrent_meta_info(req)
+        (version, account, container, obj) = split_path(req.path_info, 4, 4, True)
+
+        piece_len = self._torrent_store.get_piece_length(account, container, obj)
+        info = self.get_torrent_meta_info(req, piece_len)
         torrent_file = {
             'info': info,
             'announce': 'http://tracker.elab.kr'
         }
-        return None
+        resp = Response(content_type='application/octet-stream')
+        resp.body = bencode.bencode(torrent_file)
+        return resp
 
     @wsgify
     def __call__(self, req):
@@ -83,8 +100,8 @@ class TorrentMiddleware(object):
                 resp.headers['X-Torrent-Piece-Length'] = piece_length
             return resp
 
-        # Request .torrent File
-        if req.method == 'GET':
+       # Request .torrent File
+       if req.method == 'GET':
             return self.response_torrent_file(req)
 
        piece_len = None
@@ -92,7 +109,10 @@ class TorrentMiddleware(object):
             try:
                 piece_len = int(req.headers['X-Torrent-Piece-Length'])
             except ValueError:
-                return None # Error X-Torrent-Piece-Length Data
+                resp = Response()
+                resp.status = 400
+                resp.body = 'X-Torrent-Piece-Length Error'
+                return resp
 
         # Call API
         resp = req.get_response(self.app)
