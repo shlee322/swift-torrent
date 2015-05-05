@@ -121,7 +121,7 @@ class TorrentMiddleware(object):
         # Update Torrent MetaData
         if req.method in ['POST', 'PUT'] and piece_len:
             self.update_torrent_meta_info(req, piece_len)
-        elif req.method in ['POST', 'DELETE']:
+        elif req.method in ['PUT', 'DELETE']:
             self.update_torrent_meta_info(req)
 
         return resp
